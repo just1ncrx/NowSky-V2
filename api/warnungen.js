@@ -1,12 +1,23 @@
 // api/warnungen.js
 //
 // Aufruf:   /api/warnungen?lat=49.64&lon=8.47
-// Optional: &days=6           (wie viele Tage in die Zukunft, Default 6)
-//           &max_dist=50000   (Suchradius für die Station in Metern, Default 50000)
+// Optional: &max_dist=50000   (Suchradius für die Station in Metern, Default 50000)
 //
 // Datenquelle: Bright Sky (https://brightsky.dev) – ein freier Layer über den
 // DWD-Rohdaten. Es wird IMMER die nächstgelegene Station verwendet und nur
 // Zeitpunkte ab "jetzt" (Europe/Berlin) betrachtet.
+//
+// Ausgegeben werden NUR Warnungen mit Beginn (onset) HEUTE. Beginnt eine
+// Warnung erst MORGEN, wird sie als Vorabinformation markiert
+// (vorabinformation: true, Headline-Präfix, angepasste urgency/certainty) –
+// analog zum echten DWD-Rhythmus, wo Vorabinformationen für den Folgetag
+// typischerweise gegen 19 Uhr herausgegeben werden. Warnungen, die weder
+// heute noch morgen beginnen, werden verworfen.
+//
+// "effective" ist bewusst NICHT die exakte Aufrufzeit, sondern ein fester
+// Ausstellungszeitpunkt pro Tag (heute 06:00 für reguläre Warnungen, heute
+// 19:00 für Vorabinformationen) – ändert sich also nicht bei jedem Request,
+// sondern nur einmal täglich.
 //
 // WICHTIG: Das hier sind KEINE echten amtlichen DWD-Warnungen (die gäbe es
 // über Bright Skys /alarms-Endpoint, mit von DWD verfassten Texten). Das
@@ -20,7 +31,6 @@ const BRIGHTSKY_BASE = "https://api.brightsky.dev/weather";
 
 export default async function handler(req, res) {
   const { lat, lon } = req.query;
-  const days = clampInt(req.query.days, 1, 10, 6);
   const maxDist = clampInt(req.query.max_dist, 1000, 200000, 50000);
 
   if (!lat || !lon) {
@@ -36,15 +46,19 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { entries, station } = await fetchNearestStationForecast(
-      latitude,
-      longitude,
-      days,
-      maxDist
-    );
+    // 3 Tage Puffer holen: heute + morgen + übermorgen, damit z.B. eine
+    // Tropennacht, die morgen um 22 Uhr beginnt, bis zu ihrem Ende
+    // (übermorgen früh) vollständig in den Rohdaten vorhanden ist.
+    const { entries, station } = await fetchNearestStationForecast(latitude, longitude, 3, maxDist);
 
     const now = new Date();
-    const warnungen = WARNING_CHECKS.flatMap((check) => check(entries, now, station));
+    const todayKey = berlinDateKey(now);
+    const tomorrowKey = berlinDateKey(addDays(now, 1));
+
+    const rawWarnungen = WARNING_CHECKS.flatMap((check) => check(entries, now, station));
+    const warnungen = rawWarnungen
+      .map((w) => finalizeWarnung(w, now, todayKey, tomorrowKey))
+      .filter(Boolean);
 
     res.setHeader("Cache-Control", "s-maxage=900, stale-while-revalidate=1800");
     return res.status(200).json(warnungen);
@@ -52,6 +66,44 @@ export default async function handler(req, res) {
     console.error(err);
     return res.status(502).json({ error: "Wetterdaten konnten nicht geladen werden", detail: String(err.message || err) });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Filterung auf heute/morgen + Vorabinformation-Kennzeichnung
+// ---------------------------------------------------------------------------
+
+/**
+ * Behält nur Warnungen mit Onset heute oder morgen. "Morgen"-Warnungen
+ * werden als Vorabinformation markiert und entsprechend angepasst.
+ * Alles andere (weiter in der Zukunft) wird verworfen (-> null).
+ */
+function finalizeWarnung(w, now, todayKey, tomorrowKey) {
+  const onsetDateKey = w.onset.slice(0, 10); // w.onset ist bereits Berlin-lokal formatiert
+
+  let vorab;
+  if (onsetDateKey === todayKey) {
+    vorab = false;
+  } else if (onsetDateKey === tomorrowKey) {
+    vorab = true;
+  } else {
+    return null;
+  }
+
+  // Fester Ausstellungszeitpunkt statt exakter Aufrufzeit: reguläre
+  // Warnungen "seit heute 06:00", Vorabinformationen "seit heute 19:00"
+  // (wie beim echten DWD-Vorabinformations-Rhythmus).
+  const effective = fixedBerlinTimestamp(todayKey, vorab ? 19 : 6, now);
+
+  return {
+    ...w,
+    effective,
+    vorabinformation: vorab,
+    response_type: vorab ? "monitor" : w.response_type,
+    urgency: vorab ? "future" : w.urgency,
+    certainty: vorab ? "possible" : w.certainty,
+    headline_de: vorab ? `Vorabinformation: ${w.headline_de}` : w.headline_de,
+    status: vorab ? "custom-vorab" : "custom",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +406,17 @@ function toBerlinISOString(date) {
   return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get(
     "second"
   )}${sign}${oh}:${om}`;
+}
+
+/** Baut einen ISO-Zeitstempel für ein gegebenes Berlin-Datum + feste Stunde, z.B. "2026-08-03" + 19 -> "2026-08-03T19:00:00+02:00". */
+function fixedBerlinTimestamp(dateKey, hour, referenceDate) {
+  const offsetMin = berlinOffsetMinutes(referenceDate);
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  const oh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const om = String(abs % 60).padStart(2, "0");
+  const hh = String(hour).padStart(2, "0");
+  return `${dateKey}T${hh}:00:00${sign}${oh}:${om}`;
 }
 
 function berlinOffsetMinutes(date) {
