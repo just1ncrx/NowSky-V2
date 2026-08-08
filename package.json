@@ -1,0 +1,9 @@
+{
+  "name": "nowsky-api",
+  "version": "2.0.0",
+  "private": true,
+  "description": "NowSky API",
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12"
+  }
+}
