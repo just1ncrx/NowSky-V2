@@ -1,12 +1,4 @@
 const cheerio = require('cheerio');
-// WICHTIG: NICHT '@turf/turf' importieren! Das Meta-Paket zieht u.a.
-// @turf/convex mit rein, das intern das ESM-only Package "concaveman" per
-// require() lädt -> ERR_REQUIRE_ESM Crash in CommonJS-Umgebungen (z.B.
-// Vercel Functions). Wir brauchen nur interpolate + isobands + helpers,
-// also importieren wir gezielt nur diese Submodule.
-const { featureCollection, point } = require('@turf/helpers');
-const interpolate = require('@turf/interpolate').default;
-const isobands = require('@turf/isobands').default;
 
 // Bundesland Codes und Namen
 const BUNDESLAENDER = {
@@ -293,72 +285,6 @@ async function fetchAllBundeslaenderData() {
   return { allIndexData, stats, erstellt };
 }
 
-// Berechnet Isobänder (Gefahrenzonen als Polygone) für ein Datum aus den
-// Stationswerten. breaks definiert die Gefahrenstufen-Grenzen (0-5 = die
-// 5 WBX-Indexstufen). Gibt eine GeoJSON FeatureCollection zurück, jedes
-// Feature hat eine Werte-Range in den Properties (turf setzt das selbst).
-function computeIsobandsForDate(stations, dateStr) {
-  const validStations = stations.filter(
-    (s) => s.forecast && s.forecast[dateStr] !== null && s.forecast[dateStr] !== undefined
-  );
-
-  if (validStations.length < 4) {
-    // Zu wenig Punkte für sinnvolle Interpolation
-    return null;
-  }
-
-  const points = featureCollection(
-    validStations.map((s) =>
-      point([s.longitude, s.latitude], { value: s.forecast[dateStr] })
-    )
-  );
-
-  // Auf ein regelmäßiges Gitter interpolieren. gridSize in km -
-  // 10km ist ein guter Kompromiss zwischen Detailgrad und Performance.
-  // weight steuert die IDW-Gewichtung (höher = stärkerer Fokus auf nahe Punkte).
-  let grid;
-  try {
-    grid = interpolate(points, 10, {
-      gridType: 'points',
-      property: 'value',
-      units: 'kilometers',
-      weight: 2,
-    });
-  } catch (err) {
-    console.error(`Interpolation failed for ${dateStr}:`, err);
-    return null;
-  }
-
-  // Gefahrenstufen-Grenzen: 5 Bänder für die Indexwerte 0-5
-  const breaks = [0, 1, 2, 3, 4, 5];
-
-  let bands;
-  try {
-    bands = isobands(grid, breaks, { zProperty: 'value' });
-  } catch (err) {
-    console.error(`Isobands failed for ${dateStr}:`, err);
-    return null;
-  }
-
-  return bands;
-}
-
-// Berechnet Isobänder für alle 5 Prognosetage auf einmal.
-// Gibt ein Objekt { "2026-08-18": FeatureCollection, ... } zurück.
-function computeAllIsobands(stations, dates) {
-  if (!dates) return null;
-
-  const result = {};
-  dates.forEach((dateStr) => {
-    const bands = computeIsobandsForDate(stations, dateStr);
-    if (bands) {
-      result[dateStr] = bands;
-    }
-  });
-
-  return Object.keys(result).length > 0 ? result : null;
-}
-
 module.exports = async function handler(req, res) {
   // CORS Headers
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -448,11 +374,6 @@ module.exports = async function handler(req, res) {
       return a.name.localeCompare(b.name);
     });
 
-    // Isobänder (Polygone) pro Datum berechnen, für Kartendarstellung.
-    // Ergebnis: { "2026-08-18": GeoJSON FeatureCollection, ... } oder null,
-    // falls z.B. kein "erstellt"-Zeitstempel gefunden wurde.
-    const isobands = dates ? computeAllIsobands(stations, dates) : null;
-
     res.status(200).json({
       success: true,
       // Wann der DWD die Daten laut eigenem Footer erstellt hat
@@ -465,10 +386,6 @@ module.exports = async function handler(req, res) {
       timestamp: new Date().toISOString(),
       count: stations.length,
       data: stations,
-      // Interpolierte Gefahrenzonen (IDW + Isobänder) pro Datum, als
-      // GeoJSON FeatureCollection. Jedes Polygon-Feature hat eine
-      // Werte-Range in properties (turf setzt das automatisch).
-      isobands,
       debug: {
         stationsInCsv: Object.keys(stationsMap).length,
         stationsFoundInHtml: Object.keys(allIndexData).length,
