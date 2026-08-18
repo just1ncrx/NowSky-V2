@@ -1,5 +1,12 @@
 const cheerio = require('cheerio');
-const turf = require('@turf/turf');
+// WICHTIG: NICHT '@turf/turf' importieren! Das Meta-Paket zieht u.a.
+// @turf/convex mit rein, das intern das ESM-only Package "concaveman" per
+// require() lädt -> ERR_REQUIRE_ESM Crash in CommonJS-Umgebungen (z.B.
+// Vercel Functions). Wir brauchen nur interpolate + isobands + helpers,
+// also importieren wir gezielt nur diese Submodule.
+const { featureCollection, point } = require('@turf/helpers');
+const interpolate = require('@turf/interpolate').default;
+const isobands = require('@turf/isobands').default;
 
 // Bundesland Codes und Namen
 const BUNDESLAENDER = {
@@ -300,9 +307,9 @@ function computeIsobandsForDate(stations, dateStr) {
     return null;
   }
 
-  const points = turf.featureCollection(
+  const points = featureCollection(
     validStations.map((s) =>
-      turf.point([s.longitude, s.latitude], { value: s.forecast[dateStr] })
+      point([s.longitude, s.latitude], { value: s.forecast[dateStr] })
     )
   );
 
@@ -311,7 +318,7 @@ function computeIsobandsForDate(stations, dateStr) {
   // weight steuert die IDW-Gewichtung (höher = stärkerer Fokus auf nahe Punkte).
   let grid;
   try {
-    grid = turf.interpolate(points, 10, {
+    grid = interpolate(points, 10, {
       gridType: 'points',
       property: 'value',
       units: 'kilometers',
@@ -325,15 +332,15 @@ function computeIsobandsForDate(stations, dateStr) {
   // Gefahrenstufen-Grenzen: 5 Bänder für die Indexwerte 0-5
   const breaks = [0, 1, 2, 3, 4, 5];
 
-  let isobands;
+  let bands;
   try {
-    isobands = turf.isobands(grid, breaks, { zProperty: 'value' });
+    bands = isobands(grid, breaks, { zProperty: 'value' });
   } catch (err) {
     console.error(`Isobands failed for ${dateStr}:`, err);
     return null;
   }
 
-  return isobands;
+  return bands;
 }
 
 // Berechnet Isobänder für alle 5 Prognosetage auf einmal.
