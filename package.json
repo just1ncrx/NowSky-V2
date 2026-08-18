@@ -5,6 +5,8 @@
   "description": "NowSky API",
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
-    "@turf/turf": "^6.5.0"
+    "@turf/helpers": "^6.5.0",
+    "@turf/interpolate": "^6.5.0",
+    "@turf/isobands": "^6.5.0"
   }
 }
